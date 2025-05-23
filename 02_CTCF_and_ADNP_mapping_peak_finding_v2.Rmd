@@ -1,0 +1,290 @@
+---
+title: "ADNP and CTCF peak finding"
+output: html_notebook
+---
+
+#### map the reads
+
+cd /tungstenfs/scratch/gbuehler/michi/Projects/Adnp/CHAHP_subunits_mm39/data
+#use Fabios pipeline with 10000 allowed multimappers (use repeat sensitive settings)
+
+
+
+```{bash}
+cd michi/Projects/Adnp/CHAHP_subunits_mm39
+bamdir=/tungstenfs/scratch/gbuehler/deepSeqData/bam
+module purge
+module load MACS3/3.0.1
+macs3 callpeak -t \
+${bamdir}/Adnp_ChIP_AdnpWT_r1_3676F2_RS_multi.bam \
+${bamdir}/Adnp_ChIP_AdnpWT_r2_3676F3_RS_multi.bam \
+${bamdir}/Adnp_ChIP_AdnpDN_r1_3676F10_RS_multi.bam \
+${bamdir}/Adnp_ChIP_AdnpDN_r2_3676F11_RS_multi.bam \
+${bamdir}/Adnp_ChIP_AdnpDN_r3_3676F12_RS_multi.bam \
+${bamdir}/Adnp_ChIP_AdnpPx_r1_3676F7_RS_multi.bam \
+${bamdir}/Adnp_ChIP_AdnpPx_r2_3676F8_RS_multi.bam \
+${bamdir}/Adnp_ChIP_AdnpPx_r3_3676F9_RS_multi.bam \
+-f BAMPE -g mm --outdir peaks -n Adnp_libs3676
+
+macs3 callpeak -t \
+${bamdir}/Ctcf_ChIP_AdnpWT_1_3954F1_RS_multi.bam \
+${bamdir}/Ctcf_ChIP_AdnpWT_2_3954F2_RS_multi.bam \
+${bamdir}/Ctcf_ChIP_AdnpdN_1_3954F5_RS_multi.bam \
+${bamdir}/Ctcf_ChIP_AdnpdN_2_3954F6_RS_multi.bam \
+${bamdir}/Ctcf_ChIP_AdnpPxVxL_1_3954F3_RS_multi.bam \
+${bamdir}/Ctcf_ChIP_AdnpPxVxL_2_3954F4_RS_multi.bam \
+-f BAMPE -g mm --outdir peaks -n CTCF_libs3954
+```
+
+# calculate ChIP/Input enrichments in peaks and filter out peaks with low enrichments
+
+```{r libraries}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(GenomicFeatures)
+  library(cowplot)
+  library(Rsubread)
+  })
+
+#parameters
+#topdir <-  "../"
+topdir <- "/tungstenfs/scratch/gbuehler/michi/Projects/Adnp/CHAHP_subunits_mm39"
+datadir <- "data"
+bamdir <- "/tungstenfs/scratch/gbuehler/deepSeqData/bam"
+
+genome_file <- "/tungstenfs/scratch/gbuehler/bioinfo/Genomes/mm39/mm39.fa"
+chrsizes_file <-"/tungstenfs/scratch/gbuehler/bioinfo/Genomes/mm39/starIndex_v2_7_3a_mm39.woGTF/chrNameLength.txt"
+```
+
+### load peaks, combine them, remove peaks >5kb and center them arround summit
+
+```{r peaks, results=FALSE}
+## ADNP
+peaks.df <- read.table(file.path(topdir,"peaks/Adnp_libs3676_peaks.narrowPeak"),header=F)
+names(peaks.df) <- c("chr","start","end","name","score","empty","foldchange","pvalue","qvalue","summit")
+peaks <- makeGRangesFromDataFrame(peaks.df,
+                                   keep.extra.columns=TRUE,
+                                   ignore.strand=TRUE,
+                                   seqinfo=NULL,
+                                   seqnames.field=c("chr"),
+                                   start.field=c("start"),
+                                   end.field=c("end"),
+                                   starts.in.df.are.0based=TRUE)
+plot(density(width(peaks)), ylim=c(0,0.0035))
+#remove peaks > 5kb
+peaks <- peaks[width(peaks) < 5000]
+plot(density(width(peaks)))
+
+# CTCF
+peaks.df2 <- read.table(file.path(topdir,"peaks/CTCF_libs3954_peaks.narrowPeak"),header=F)
+names(peaks.df2) <- c("chr","start","end","name","score","empty","foldchange","pvalue","qvalue","summit")
+peaks2 <- makeGRangesFromDataFrame(peaks.df2,
+                                   keep.extra.columns=TRUE,
+                                   ignore.strand=TRUE,
+                                   seqinfo=NULL,
+                                   seqnames.field=c("chr"),
+                                   start.field=c("start"),
+                                   end.field=c("end"),
+                                   starts.in.df.are.0based=TRUE)
+plot(density(width(peaks2)), ylim=c(0,0.0035), main="peak width [bp]", col="blue")
+
+
+#remove peaks > 5kb
+peaks2 <- peaks2[width(peaks2) < 5000]
+plot(density(width(peaks2)))
+
+#center peaks on summit
+start(peaks) <- start(peaks) + peaks$summit
+end(peaks) <- start(peaks)
+peaks <- resize(peaks,width=300L, fix="center")
+names(peaks) <- peaks$name
+
+#center peaks2 on summit
+start(peaks2) <- start(peaks2) + peaks2$summit
+end(peaks2) <- start(peaks2)
+peaks2 <- resize(peaks2,width=300L, fix="center")
+names(peaks2) <- peaks2$name
+
+
+#remove peaks that extend over the edge of chromosome
+chr_sizes <- read.table(chrsizes_file)
+chr_sizes$start <- 1
+chr_sizes <- makeGRangesFromDataFrame(chr_sizes,
+                                   keep.extra.columns=TRUE,
+                                   ignore.strand=TRUE,
+                                   seqinfo=NULL,
+                                   seqnames.field=c("V1"),
+                                   start.field=c("start"),
+                                   end.field=c("V2"),
+                                   starts.in.df.are.0based=FALSE)
+
+peaks <- peaks[overlapsAny(peaks,chr_sizes,minoverlap = width(peaks)[1])==TRUE]
+common_levels <- seqlevels(peaks)[seqlevels(peaks) %in% seqlevels(chr_sizes)]
+peaks <- keepSeqlevels(peaks,value = common_levels)
+
+peaks2 <- peaks2[overlapsAny(peaks2,chr_sizes,minoverlap = width(peaks2)[1])==TRUE]
+common_levels <- seqlevels(peaks2)[seqlevels(peaks2) %in% seqlevels(chr_sizes)]
+peaks2 <- keepSeqlevels(peaks2,value = common_levels)
+
+#combine peaks
+peaks <- c(peaks2, peaks[overlapsAny(peaks,peaks2)==FALSE])
+```
+
+### calculate read counts in peaks for ChIPs and Inputs 
+
+```{r counts}
+bamFiles <- list.files(bamdir,pattern = "RS_multi.bam$",full.names = TRUE)
+bamFiles <- c(grep("3676F",bamFiles,value=TRUE),grep("3954F",bamFiles,value=TRUE))
+bamFiles <- grep("_P3_",bamFiles,value=TRUE,invert=TRUE)
+bamFiles <- grep("AdnpPTC",bamFiles,value=TRUE,invert=TRUE)
+bamFiles <- grep("Adnp_ChIP_AdnpWT_r3",bamFiles,value=TRUE,invert=TRUE)
+
+
+bamNames <- gsub("/tungstenfs/scratch/gbuehler/deepSeqData/bam/","",bamFiles)
+bamNames <- gsub("_3676F.._RS_multi.bam","",bamNames)
+bamNames <- gsub("_3676F._RS_multi.bam","",bamNames)
+bamNames <- gsub("_3954F._RS_multi.bam","",bamNames)
+bamNames <- gsub("AdnpDN","AdnpdN",bamNames)
+bamNames <- gsub("AdnpPxVxL","AdnpPx",bamNames)
+bamNames <- gsub("_1$","_r1",bamNames)
+bamNames <- gsub("_2$","_r2",bamNames)
+bamNames <- ifelse(grepl("Input",bamNames),gsub("_r2","",bamNames),bamNames)
+
+#saf table for featureCounts
+saf <- data.frame(GeneID= names(peaks), Chr=seqnames(peaks),
+                  Start=start(peaks), End=end(peaks),Strand=strand(peaks),Score=peaks$score)
+
+f_counts <- featureCounts(bamFiles,annot.ext=saf,isGTFAnnotationFile = FALSE,
+                          useMetaFeatures=FALSE,allowMultiOverlap=TRUE,
+                          minOverlap=1,countMultiMappingReads=FALSE,fraction=TRUE,
+                          minMQS=255,strandSpecific=0,nthreads=24,verbose=FALSE,isPairedEnd=TRUE)
+
+fcounts <- data.frame(f_counts$counts)
+colnames(fcounts) <- bamNames   
+```
+
+### normalize counts to total mapped read numbers (cpm)
+
+```{r cpmNormalisation}
+#calculate CPMs
+cpm <- f_counts$counts
+
+#normalize to 1 mio mappers per library
+columns = c("libs","mapped_reads") 
+mapped_reads_df = data.frame(matrix(nrow = length(bamNames), ncol = length(columns))) 
+colnames(mapped_reads_df) = columns
+mapped_reads_df$libs <- bamNames
+
+i=1
+for (i in seq_along(bamFiles)){
+  mapped_reads <- sum(f_counts$stat[f_counts$stat$Status=="Assigned" | f_counts$stat$Status=="Unassigned_NoFeatures",i+1])
+  mapped_reads_df$mapped_reads[i] <- mapped_reads
+  scaling_factor <-  mapped_reads/1e6
+  cpm[,i] <- f_counts$counts[,i]/scaling_factor
+  i = i+1
+}
+
+
+cpm <- data.frame(cpm)
+colnames(cpm) <- bamNames
+
+
+save(cpm,file=file.path(topdir,datadir,"ADNP_CTCF_allpeaks_cpms_mq255.RData"))
+
+```
+
+### calculate ChIP/Input enrichment 
+
+```{r enrichments}
+#| fig-width: 10
+#| fig-height: 10
+
+AdnpWT_enr <- log2((cpm[,grep("Adnp_ChIP_AdnpWT_",colnames(cpm))]+1)/(rowMeans(cpm[,grep("Input_",colnames(cpm))])+1))
+CTCFWT_enr <- log2((cpm[,grep("Ctcf_ChIP_AdnpWT_",colnames(cpm))]+1)/(rowMeans(cpm[,grep("Input_",colnames(cpm))])+1))
+
+AdnpdN_enr <- log2((cpm[,grep("Adnp_ChIP_AdnpdN_",colnames(cpm))]+1)/(rowMeans(cpm[,grep("Input_",colnames(cpm))])+1))
+CTCFdN_enr <- log2((cpm[,grep("Ctcf_ChIP_AdnpdN_",colnames(cpm))]+1)/(rowMeans(cpm[,grep("Input_",colnames(cpm))])+1))
+
+AdnpPx_enr <- log2((cpm[,grep("Adnp_ChIP_AdnpPx_",colnames(cpm))]+1)/(rowMeans(cpm[,grep("Input_",colnames(cpm))])+1))
+CTCFPx_enr <- log2((cpm[,grep("Ctcf_ChIP_AdnpPx_",colnames(cpm))]+1)/(rowMeans(cpm[,grep("Input_",colnames(cpm))])+1))
+
+
+# plot enrichment vs peak score from MACS3
+smoothScatter(rowMeans(AdnpWT_enr),log2(peaks$score))
+smoothScatter(rowMeans(AdnpdN_enr),log2(peaks$score))
+smoothScatter(rowMeans(CTCFWT_enr),log2(peaks$score))
+smoothScatter(rowMeans(CTCFdN_enr),log2(peaks$score))
+smoothScatter(rowMeans(AdnpPx_enr),log2(peaks$score))
+smoothScatter(rowMeans(CTCFPx_enr),log2(peaks$score))
+```
+
+
+### filter peaks based on enrichment (more than 1.2 fold enriched in all replicates)
+
+
+```{r filter}
+AdnpWT_enr2 <- rowSums(AdnpWT_enr > log2(1.5)) >= 2
+AdnpdN_enr2 <- rowSums(AdnpdN_enr > log2(1.5)) >= 3
+AdnpPx_enr2 <- rowSums(AdnpPx_enr > log2(1.5)) >= 3
+
+CTCFWT_enr2 <- rowSums(CTCFWT_enr > log2(1.2)) >= 2
+CTCFdN_enr2 <- rowSums(CTCFdN_enr > log2(1.2)) >= 2
+CTCFPx_enr2 <- rowSums(CTCFPx_enr > log2(1.2)) >= 2
+
+truePeak <- rowSums(cbind(AdnpWT_enr2,AdnpdN_enr2,CTCFWT_enr2,CTCFdN_enr2,AdnpPx_enr2,CTCFPx_enr2))
+
+#additional filter based on total cpm
+cpmcut <- 3
+cpmPeak <- log2(rowSums(cpm)+1)
+plot(density(cpmPeak))
+abline(v=cpmcut)
+
+#filter pekas based on enrichmnet
+Peaks_filtered <- peaks[truePeak > 0 & cpmPeak > cpmcut]
+all_enr <- cbind(AdnpWT_enr,AdnpdN_enr,AdnpPx_enr,CTCFWT_enr,CTCFdN_enr,CTCFPx_enr)
+all_enr_filtered <- all_enr[truePeak > 0 & cpmPeak > cpmcut,]
+cpm_filtered <- cpm[truePeak > 0 & cpmPeak > cpmcut,]
+
+AdnpWT_enr2 <- AdnpWT_enr2[truePeak > 0 & cpmPeak > cpmcut]
+AdnpdN_enr2 <- AdnpdN_enr2[truePeak > 0 & cpmPeak > cpmcut]
+AdnpPx_enr2 <- AdnpPx_enr2[truePeak > 0 & cpmPeak > cpmcut]
+
+CTCFWT_enr2 <- CTCFWT_enr2[truePeak > 0 & cpmPeak > cpmcut]
+CTCFdN_enr2 <- CTCFdN_enr2[truePeak > 0 & cpmPeak > cpmcut]
+CTCFPx_enr2 <- CTCFPx_enr2[truePeak > 0 & cpmPeak > cpmcut]
+
+enriched <- cbind(AdnpWT_enr2,AdnpdN_enr2,AdnpPx_enr2,CTCFWT_enr2,CTCFdN_enr2,CTCFPx_enr2)
+```
+
+
+
+
+
+### save the peaks
+
+```{r}
+# save final peak set: 1.2 foldEnr, >05 cpm, score >100
+mcols(Peaks_filtered) <- cbind(mcols(Peaks_filtered),all_enr_filtered,cpm_filtered,enriched)
+saveRDS(object = Peaks_filtered, file = file.path(topdir,datadir, "Adnp_Ctcf_Peaks_filtered_1.2foldCTCF_1.5foldADNPEnr.rds"))
+
+#save as bed file
+Peaks_filtered_bed <- data.frame(chr=seqnames(Peaks_filtered),start=start(Peaks_filtered)-1,end=end(Peaks_filtered),
+           names=Peaks_filtered$name,
+                 scores=Peaks_filtered$score,
+                 strands=strand(Peaks_filtered))
+write.table(Peaks_filtered_bed, file=file.path(topdir,"peaks/Adnp_Ctcf_Peaks_filtered_1.2foldCTCF_1.5foldADNPEnr.bed"), quote=F, sep="\t", row.names=F, col.names=F)
+```
+
+# check some stats for reporting summary
+
+```{r}
+Peaks_filtered <- readRDS(file = file.path(topdir,datadir, "Adnp_Ctcf_Peaks_filtered_1.2foldCTCF_1.5foldADNPEnr.rds"))
+Peaks_filtered[Peaks_filtered$qvalue > -log10(0.05)]
+Peaks_filtered[Peaks_filtered$foldchange > 5]
+```
+
+
+# Session info
+```{r session_info}
+sessionInfo()
+```

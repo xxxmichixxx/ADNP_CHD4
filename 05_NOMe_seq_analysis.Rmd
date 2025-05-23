@@ -1,0 +1,92 @@
+---
+title: "NOMe-seq analysis"
+output: html_notebook
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+  library(fetchNOMe)
+  library(NOMeConverteR)
+  library(dinoR)
+  library(tidyverse)
+})
+
+#parameters
+topdir <-  "michi/Projects/Adnp/CHAHP_subunits_mm39"
+datadir <- "data"
+plotdir <- "plots"
+```
+
+#### load ROIs
+
+```{r}
+ROIs <- readRDS("michi/Projects/Adnp/NOMEseq/manuscript/ROIs/ROIs.rds")
+```
+
+#### find samples
+
+```{r}
+samples <- read.table("michi/Projects/Adnp/NOMEseq/all_samples_amplicons_batch1.txt",header=TRUE)
+sel_samples <- samples[samples$Group %in% c("WT","AdnpKO","PxVxL_FM","AdnpNterm"),]
+sel_samples$bamdir <- paste0("michi/Projects/Adnp/NOMEseq//bam.",substr(sel_samples$LibID,1,5))
+sel_samples$bamname <- paste0(sel_samples$SampleName,"_dedup.bam")
+write.table(sel_samples, file="NOMEseq_samples.txt",col.names=TRUE,row.names=FALSE,quote=FALSE, append=FALSE)
+```
+
+
+#### Nome Matrix for WT, AdnpKO,Adnp dN, Adnp PxVxL in all ROIs, replicates merged
+
+```{r}
+bamFiles <- paste(sel_samples$bamdir,sel_samples$bamname,sep="/")
+bamNames <- sel_samples$Group
+
+Nome_matrix <- get_data_matrix_from_bams(
+  bamfiles= bamFiles,
+  samplenames=bamNames,
+  regions=ROIs,
+  genome="michi/Annotations/BISCUIT/mm10_withoutAltChr.fa",
+  whichContext = c("GCH"),
+  collapseBySample = TRUE,
+  remove_nonunique = FALSE,
+  clip_until_nbg = 0L,
+  noclip_protect_frac_above = 0.9,
+  max_bisC_meth = 0.1,
+  min_bisC_size = 10,
+  mapqMin = 30,
+  mapqMax = 255,
+  max_read_size = 1000L,
+  ncores = 10L
+)
+saveRDS(Nome_matrix,file=file.path(topdir,datadir,"Nome_matrix_WT_AdnpKO_dN_PxVxL_replicatesMerged.rds"))
+```
+
+# convert to Ranged Summarized Experiment format for dinoR
+
+```{r}
+NomeMatrix <- readRDS(file=file.path(topdir,datadir,"Nome_matrix_WT_AdnpKO_dN_PxVxL_replicatesMerged.rds"))
+NomeMatrix <- NomeMatrix[NomeMatrix$names %in% names(ROIs), ]
+
+#generate an annotation data frame for all the samples represented in the NOME Matrix, add group info
+annots <- data.frame(samples=unique(NomeMatrix$SampleName),group=c("Adnp_KO", "Adnp_dN", "Adnp_PxVxL","Adnp_WT"))
+rownames(annots) <- annots$samples
+
+#convert
+NomeData <- convert_tibble_to_RSE(NomeMatrix,ROIs,annots)
+saveRDS(NomeData,file=file.path(topdir,datadir,"Nome_matrix_WT_AdnpKO_dN_PxVxL_replicatesMerged_RSEformat.rds"))
+```
+
+# generate average plots
+
+```{r}
+avePlotData <- metaPlots(NomeData,nr=3,nROI = 3,ROIgroup="type")
+
+ggplot(avePlotData, aes(x=position,y=protection)) + geom_point(alpha=0.5) + 
+    geom_line(aes(x=position,y=loess,col=type),lwd=2) + scale_color_manual(values=c("darkgreen","firebrick","darkgrey")) +
+    theme_classic() + facet_grid(rows = vars(type),cols= vars(sample), scales = "free") +
+    ylim(c(0,100)) + geom_hline(yintercept = c(10,20,30,40,50,60,70,80,90),
+                                alpha=0.5,color="grey",linetype="dashed")
+ggsave(file.path(topdir,plotdir,"WT_AdnpKO_Adnp_dN_PxVxL_metaPlots_splitBy_Adnp_Ctcf_Rest.pdf"),height=6,width=9)
+```
+
